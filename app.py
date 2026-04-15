@@ -1,6 +1,5 @@
 import os
 import tempfile
-from typing import List
 
 import streamlit as st
 from langchain_community.document_loaders import PyPDFLoader
@@ -15,31 +14,14 @@ st.title("🎓 Ewha Admission RAG Chatbot")
 st.caption("Ask questions in English about the uploaded Ewha admission guide. Answers are generated only from retrieved document chunks.")
 
 DEFAULT_MODEL = "Pro/deepseek-ai/DeepSeek-R1"
-DEFAULT_BASE_URL = "https://api.siliconflow.cn/Pro/deepseek-ai/DeepSeek-V3.2"
+DEFAULT_BASE_URL = "https://api.siliconflow.cn/v1"
 EMBED_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+DEFAULT_PDF_PATH = "data/ewha.pdf"
 
 
 @st.cache_resource(show_spinner=False)
 def get_embeddings() -> HuggingFaceEmbeddings:
     return HuggingFaceEmbeddings(model_name=EMBED_MODEL)
-
-
-def load_pdf(uploaded_file) -> List:
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-        tmp.write(uploaded_file.getbuffer())
-        tmp_path = tmp.name
-
-    try:
-        loader = PyPDFLoader(tmp_path)
-        docs = loader.load()
-    finally:
-        try:
-            os.remove(tmp_path)
-        except OSError:
-            pass
-
-    return docs
-
 
 @st.cache_resource(show_spinner=False)
 def build_vectorstore(file_bytes: bytes, file_name: str):
@@ -117,58 +99,65 @@ User question:
 
 with st.sidebar:
     st.header("Settings")
-    api_key = st.text_input("SiliconFlow API Key", type="password")
+    default_api_key = st.secrets.get("SILICONFLOW_API_KEY", "")
+    api_key = st.text_input("SiliconFlow API Key", value=default_api_key, type="password")
     model_name = st.text_input("Model name", value=DEFAULT_MODEL)
-    base_url = st.text_input("Base URL", value=DEFAULT_BASE_URL)
+    base_url = DEFAULT_BASE_URL
     top_k = st.slider("Number of retrieved chunks", min_value=3, max_value=10, value=6)
-    st.markdown("Recommended model: `deepseek-ai/DeepSeek-R1`")
-    st.markdown("Base URL must end with `.cn/v1` for your current setup.")
+    st.markdown("Recommended model: `Pro/deepseek-ai/DeepSeek-R1`")
+    st.markdown("Base URL is fixed to `.cn/v1` for this app.")
 
-uploaded_file = st.file_uploader("Upload an admission PDF", type=["pdf"])
+if not os.path.exists(DEFAULT_PDF_PATH):
+    st.error(f"Default PDF not found: {DEFAULT_PDF_PATH}")
+    st.stop()
 
-if uploaded_file is not None:
-    try:
-        vectorstore, page_count, chunk_count, filtered_count, stored_name = build_vectorstore(
-            uploaded_file.getvalue(), uploaded_file.name
-        )
-        retriever = vectorstore.as_retriever(search_kwargs={"k": top_k})
+try:
+    with open(DEFAULT_PDF_PATH, "rb") as f:
+        file_bytes = f.read()
 
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Pages", page_count)
-        col2.metric("Chunks", chunk_count)
-        col3.metric("Indexed chunks", filtered_count)
-
-        st.success(f"Document indexed successfully: {stored_name}")
-    except Exception as exc:
-        st.error(f"Failed to process the PDF: {exc}")
-        st.stop()
-
-    question = st.text_input(
-        "Ask a question in English",
-        value="When is the online application period for Fall 2026?",
+    vectorstore, page_count, chunk_count, filtered_count, stored_name = build_vectorstore(
+        file_bytes, os.path.basename(DEFAULT_PDF_PATH)
     )
+    retriever = vectorstore.as_retriever(search_kwargs={"k": top_k})
 
-    if st.button("Get answer"):
-        if not api_key:
-            st.error("Please enter your SiliconFlow API key in the sidebar.")
-        elif not question.strip():
-            st.error("Please enter a question.")
-        else:
-            try:
-                llm = build_llm(api_key=api_key.strip(), model_name=model_name.strip(), base_url=base_url.strip())
-                with st.spinner("Generating answer..."):
-                    answer, sources = answer_question(llm, retriever, question.strip())
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Pages", page_count)
+    col2.metric("Chunks", chunk_count)
+    col3.metric("Indexed chunks", filtered_count)
 
-                st.subheader("Answer")
-                st.write(answer)
+    st.success(f"Document indexed successfully: {stored_name}")
+except Exception as exc:
+    st.error(f"Failed to process the PDF: {exc}")
+    st.stop()
 
-                st.subheader("Retrieved sources")
-                for idx, doc in enumerate(sources, start=1):
-                    page_num = doc.metadata.get("page")
-                    page_label = f"Page {page_num + 1}" if isinstance(page_num, int) else "Unknown page"
-                    with st.expander(f"Source {idx} — {page_label}"):
-                        st.write(doc.page_content)
-            except Exception as exc:
-                st.error(f"Request failed: {exc}")
-else:
-    st.info("Upload your Ewha admission PDF to start.")
+question = st.text_input(
+    "Ask a question in English",
+    value="When is the online application period for Fall 2026?",
+)
+
+if st.button("Get answer"):
+    if not api_key:
+        st.error("Please enter your SiliconFlow API key in the sidebar.")
+    elif not question.strip():
+        st.error("Please enter a question.")
+    else:
+        try:
+            llm = build_llm(
+                api_key=api_key.strip(),
+                model_name=model_name.strip(),
+                base_url=base_url,
+            )
+            with st.spinner("Generating answer..."):
+                answer, sources = answer_question(llm, retriever, question.strip())
+
+            st.subheader("Answer")
+            st.write(answer)
+
+            st.subheader("Retrieved sources")
+            for idx, doc in enumerate(sources, start=1):
+                page_num = doc.metadata.get("page")
+                page_label = f"Page {page_num + 1}" if isinstance(page_num, int) else "Unknown page"
+                with st.expander(f"Source {idx} — {page_label}"):
+                    st.write(doc.page_content)
+        except Exception as exc:
+            st.error(f"Request failed: {exc}")
